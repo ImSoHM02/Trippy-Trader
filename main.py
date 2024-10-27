@@ -1,32 +1,110 @@
 import csv
 import os
 import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List
+from time import sleep
 import requests
-import xml.etree.ElementTree as ET
-
-from collections import defaultdict
+from PyQt6.QtCore import Qt, QSortFilterProxyModel, QThread, pyqtSignal, QSettings, QTimer
+from PyQt6.QtGui import QIcon, QPixmap, QIntValidator
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QComboBox, QLabel, QProgressDialog, QPushButton, QScrollArea, 
+    QFrame, QMessageBox, QCheckBox, QLineEdit, QGridLayout,
+    QSizePolicy, QDialog, QDialogButtonBox
+)
 from io import BytesIO
-from PyQt6.QtCore import Qt, QSortFilterProxyModel, QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                           QComboBox, QLabel, QProgressDialog, QPushButton, QFileDialog,
-                           QScrollArea, QFrame, QMessageBox, QCheckBox, QLineEdit)
 
+CSV_FIELDS = [
+    'Handle', 'Title', 'Body (HTML)', 'Vendor', 'Product Category', 'Type', 'Tags',
+    'Published', 'Option1 Name', 'Option1 Value', 'Option1 Linked To', 'Option2 Name',
+    'Option2 Value', 'Option2 Linked To', 'Option3 Name', 'Option3 Value',
+    'Option3 Linked To', 'Variant SKU', 'Variant Grams', 'Variant Inventory Tracker',
+    'Variant Inventory Policy', 'Variant Fulfillment Service', 'Variant Price',
+    'Variant Compare At Price', 'Variant Requires Shipping', 'Variant Taxable',
+    'Variant Barcode', 'Image Src', 'Image Position', 'Image Alt Text', 'Gift Card',
+    'SEO Title', 'SEO Description', 'Google Shopping / Google Product Category',
+    'Google Shopping / Gender', 'Google Shopping / Age Group', 'Google Shopping / MPN',
+    'Google Shopping / Condition', 'Google Shopping / Custom Product',
+    'Google Shopping / Custom Label 0', 'Google Shopping / Custom Label 1',
+    'Google Shopping / Custom Label 2', 'Google Shopping / Custom Label 3',
+    'Google Shopping / Custom Label 4',
+    'EComposer product countdown end at (product.metafields.ecomposer.countdown)',
+    'EComposer product countdown start at (product.metafields.ecomposer.countdown_from)',
+    'Google: Custom Product (product.metafields.mm-google-shopping.custom_product)',
+    'Recommended age group (product.metafields.shopify.recommended-age-group)',
+    'Toy figure features (product.metafields.shopify.toy-figure-features)',
+    'Video game genre (product.metafields.shopify.video-game-genre)',
+    'Video game platform (product.metafields.shopify.video-game-platform)',
+    'Video game sub-genre (product.metafields.shopify.video-game-sub-genre)',
+    'Complementary products (product.metafields.shopify--discovery--product_recommendation.complementary_products)',
+    'Related products (product.metafields.shopify--discovery--product_recommendation.related_products)',
+    'Related products settings (product.metafields.shopify--discovery--product_recommendation.related_products_display)',
+    'Variant Image', 'Variant Weight Unit', 'Variant Tax Code', 'Cost per item',
+    'Included / Australia', 'Price / Australia', 'Compare At Price / Australia',
+    'Included / new zealand', 'Price / new zealand', 'Compare At Price / new zealand',
+    'Included / world wide', 'Price / world wide', 'Compare At Price / world wide',
+    'Status'
+]
 
+# Configuration dataclass for MobyGames API
+@dataclass
+class MobyGamesConfig:
+    api_key: str
+    base_url: str = "https://api.mobygames.com/v1"
+    rate_limit: float = 1.0  # Time between requests in seconds
+    cache_dir: str = "cache"
 
+class APIKeyDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("MobyGames API Key")
+        self.setModal(True)
+        
+        layout = QVBoxLayout(self)
+        
+        # Add explanation label
+        layout.addWidget(QLabel(
+            "Please enter your MobyGames API key.\n"
+            "You can get one from: https://www.mobygames.com/info/api/"
+        ))
+        
+        # Add input field
+        self.key_input = QLineEdit()
+        layout.addWidget(self.key_input)
+        
+        # Add buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | 
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+        
+        # Load existing key if any
+        settings = QSettings('TrippyTrader', 'MobyGames')
+        saved_key = settings.value('api_key', '')
+        if saved_key:
+            self.key_input.setText(saved_key)
+    
+    def get_api_key(self):
+        return self.key_input.text().strip()
 
 class ImageLoader(QThread):
     image_loaded = pyqtSignal(str, QPixmap)
     
-    def __init__(self, url, filename):
+    def __init__(self, url, identifier):
         super().__init__()
         self.url = url
-        self.filename = filename
+        self.identifier = identifier
         self._is_running = True
         
     def stop(self):
         self._is_running = False
-        self.wait()  # Wait for the thread to finish
+        self.wait()
         
     def run(self):
         if not self._is_running:
@@ -34,14 +112,14 @@ class ImageLoader(QThread):
             
         try:
             response = requests.get(self.url)
-            if not self._is_running:  # Check if we should continue
+            if not self._is_running:
                 return
                 
             image_data = BytesIO(response.content)
             pixmap = QPixmap()
             pixmap.loadFromData(image_data.getvalue())
             
-            if not self._is_running:  # Check if we should continue
+            if not self._is_running:
                 return
                 
             # Scale to 30%
@@ -52,33 +130,79 @@ class ImageLoader(QThread):
                 Qt.TransformationMode.SmoothTransformation
             )
             
-            if self._is_running:  # Only emit if we're still running
-                self.image_loaded.emit(self.filename, scaled_pixmap)
+            if self._is_running:
+                self.image_loaded.emit(self.identifier, scaled_pixmap)
         except Exception as e:
             print(f"Error loading image {self.url}: {str(e)}")
 
 class ImageWidget(QFrame):
-    def __init__(self, parent=None):
+    def __init__(self, image_url=None, image_type=None, region=None, parent=None):
         super().__init__(parent)
         self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        
         self.layout = QVBoxLayout(self)
+        self.layout.setSpacing(5)
+        self.layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Image display
         self.image_label = QLabel()
-        self.info_label = QLabel()
-        self.info_label.setWordWrap(True)
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setFixedSize(200, 200)
         
-        # Add checkbox for selection
+        # Info layout
+        info_layout = QVBoxLayout()
+        
+        # Image type label
+        if image_type:
+            self.type_label = QLabel(f"<b>{image_type}</b>")
+            self.type_label.setStyleSheet("color: #2c3e50;")
+            self.type_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            info_layout.addWidget(self.type_label)
+        
+        # Region label
+        if region:
+            self.region_label = QLabel(f"Region: {region}")
+            self.region_label.setStyleSheet("color: #7f8c8d;")
+            self.region_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            info_layout.addWidget(self.region_label)
+        
+        # Checkbox for selection
         self.checkbox = QCheckBox("Select for Export")
+        self.checkbox.setStyleSheet("""
+            QCheckBox {
+                padding: 5px;
+                border-radius: 3px;
+            }
+            QCheckBox:hover {
+                background-color: #f0f0f0;
+            }
+        """)
         
+        # Add widgets to layout
         self.layout.addWidget(self.image_label)
-        self.layout.addWidget(self.info_label)
+        self.layout.addLayout(info_layout)
         self.layout.addWidget(self.checkbox)
         
-        # Store the image URL
-        self.image_url = ""
+        # Store image URL
+        self.image_url = image_url
         
-        # Set minimum size for the widget
-        self.setMinimumWidth(200)
-        self.setMinimumHeight(200)
+        # Set focus policy
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        
+        # Add hover effect
+        self.setStyleSheet("""
+            QFrame {
+                border: 1px solid #ddd;
+                border-radius: 5px;
+                padding: 5px;
+                background-color: white;
+            }
+            QFrame:hover {
+                border: 1px solid #3498db;
+                background-color: #f8f9fa;
+            }
+        """)
 
 class SearchableComboBox(QComboBox):
     def __init__(self, parent=None):
@@ -117,18 +241,171 @@ class SearchableComboBox(QComboBox):
     def focusOutEvent(self, event):
         if not self.view().isVisible():
             super().focusOutEvent(event)
+            
+class MobyGamesAPI:
+    def __init__(self, config: MobyGamesConfig):
+        self.config = config
+        self.last_request_time = 0  # Initialize to 0
+        
+        # Create cache directory if it doesn't exist
+        os.makedirs(self.config.cache_dir, exist_ok=True)
+    
+    def _rate_limit(self):
+        #Implement rate limiting
+        current_time = datetime.now()
+        time_since_last = (current_time - datetime.fromtimestamp(self.last_request_time)).total_seconds() if self.last_request_time > 0 else float('inf')
+        
+        if time_since_last < self.config.rate_limit:
+            sleep(self.config.rate_limit - time_since_last)
+        
+        self.last_request_time = current_time.timestamp()
+    
+    def _get_cache_path(self, endpoint: str, params: Dict = None) -> str:
+        #Generate cache file path for request
+        params_str = '_'.join(f"{k}-{v}" for k, v in (params or {}).items())
+        filename = f"{endpoint.replace('/', '_')}_{params_str}.json".replace('?', '_')
+        return os.path.join(self.config.cache_dir, filename)
+    
+    def _make_request(self, endpoint: str, params: Dict = None) -> Dict:
+        #Make an API request with rate limiting and caching
+        cache_path = self._get_cache_path(endpoint, params)
+        
+        # Check cache first
+        if os.path.exists(cache_path):
+            with open(cache_path, 'r') as f:
+                return eval(f.read())  # Using eval since json.loads doesn't handle single quotes
+        
+        # Make actual request
+        self._rate_limit()
+        url = f"{self.config.base_url}/{endpoint}"
+        params = params or {}
+        params['api_key'] = self.config.api_key
+        
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Cache the response
+        with open(cache_path, 'w') as f:
+            f.write(str(data))
+        
+        return data
+    
+    def get_platforms(self) -> List[Dict]:
+        #Get all available platforms
+        response = self._make_request('platforms')
+        return response.get('platforms', [])
+    
+    def get_games_by_platform(self, platform_id: int) -> List[Dict]:
+        #Get all games for a specific platform, handling pagination
+        all_games = []
+        offset = 0
+        total = None
+
+        while total is None or offset < total:
+            response = self._make_request('games', {
+                'platform': platform_id,
+                'offset': offset,
+                'limit': 100,
+                'format': 'brief'  # Request minimal data
+            })
+
+            games = response.get('games', [])
+            all_games.extend(games)
+
+            # Get total count from first response
+            if total is None:
+                total = response.get('total_count', 0)
+
+            # Update offset for next page
+            offset += len(games)
+
+            # Break if we got fewer games than requested (last page)
+            if len(games) < 100:
+                break
+            
+        return all_games
+    
+    def get_game(self, game_id: int) -> Dict:
+        #Get detailed information about a specific game
+        return self._make_request(f'games/{game_id}')
+    
+    def get_game_platform_covers(self, game_id: int, platform_id: int) -> Dict:
+        #Get covers for a specific game and platform
+        return self._make_request(f'games/{game_id}/platforms/{platform_id}/covers')
+            
+    def search_games_by_platform(self, platform_id: int, search_term: str) -> List[Dict]:
+        #Search for games on a specific platform
+        response = self._make_request('games', {
+            'platform': platform_id,
+            'title': search_term,
+            'format': 'brief',
+            'limit': 100  # Keep reasonable limit for search results
+        })
+        return response.get('games', [])
 
 class GameBrowser(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Trippy Trader")
+        self.variants = [
+            "Black Label - Very Good",
+            "Black Label - Good",
+            "Black Label - Damaged",
+            "Black Label - Very Good + Manual",
+            "Black Label - Good + Manual",
+            "Black Label - Damaged + Manual",
+            "Platinum - Very Good",
+            "Platinum - Good",
+            "Platinum - Damaged",
+            "Platinum - Very Good + Manual",
+            "Platinum - Good + Manual",
+            "Platinum - Damaged + Manual",
+            "Disk Only"
+        ]
+        
+        self.setWindowTitle("Trippy Trader - Sugondese Edition v0.69")
         self.setMinimumSize(1200, 800)
         
-        self.platforms = set()
-        self.regions = set()
-        self.games_by_platform = defaultdict(list)
-        self.games_data = {}
-        self.images_data = defaultdict(list)
+        # Initialize the status bar
+        self.statusBar()  # This creates the status bar
+
+        # Create a message label for the status bar
+        self.message_label = QLabel()
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message_label.setStyleSheet("color: green;")
+        self.statusBar().addPermanentWidget(self.message_label, 1)
+        
+        # Set window icon and initialize data structures
+        icon_path = Path("assets/icon.png")  # Adjust path as needed
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        
+        # Initialize settings and API
+        settings = QSettings('TrippyTrader', 'MobyGames')
+        api_key = settings.value('api_key', '')
+
+        # Initialize details_labels for displaying game information
+        self.details_labels = {'Name': QLabel()}  # Ensure it is available throughout the class
+
+        if not api_key:
+            dialog = APIKeyDialog(self)
+            if dialog.exec():
+                api_key = dialog.get_api_key()
+                settings.setValue('api_key', api_key)
+            else:
+                sys.exit(0)
+        
+        # Initialize MobyGames API
+        config = MobyGamesConfig(
+            api_key=api_key,
+            cache_dir="mobygames_cache"
+        )
+        self.api = MobyGamesAPI(config)
+        
+        # Initialize data structures
+        self.platforms = {}  # id: name mapping
+        self.current_games = []  # Current list of games for selected platform
+        self.current_game_details = None
         self.image_loaders = []
         
         # Create main widget and layout
@@ -136,201 +413,356 @@ class GameBrowser(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
         
-        # Create button layout
-        button_layout = QHBoxLayout()
+        # Add header image (centered at the top)
+        header_layout = QHBoxLayout()
+        header_image_path = Path("assets/header.png")  # Adjust path as needed
+        if header_image_path.exists():
+            header_label = QLabel()
+            header_pixmap = QPixmap(str(header_image_path))
+            # Scale the header image to fit the width while maintaining aspect ratio
+            scaled_header = header_pixmap.scaledToWidth(
+                210,  # Slightly less than window width to account for margins
+                Qt.TransformationMode.SmoothTransformation
+            )
+            header_label.setPixmap(scaled_header)
+            header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header_layout.addWidget(header_label)
+            main_layout.addLayout(header_layout)
         
-        # Add file selection button
-        self.file_button = QPushButton("Select XML File")
-        self.file_button.clicked.connect(self.select_file)
-        button_layout.addWidget(self.file_button)
+        # Call create_ui to build the UI
+        self.create_ui(main_layout)
         
-        # Add export button
-        self.export_button = QPushButton("Export Selected to CSV")
-        self.export_button.clicked.connect(self.export_to_csv)
-        button_layout.addWidget(self.export_button)
-        
-        # Add button layout to main layout
-        main_layout.addLayout(button_layout)
-        
+        # Load initial data
+        self.load_platforms()
+    
+    def create_ui(self, layout):
+        # Create container for upper content
+        upper_container = QWidget()
+        upper_layout = QVBoxLayout(upper_container)
+        upper_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Platform selection
+        upper_layout.addWidget(QLabel("Select Platform:"))
         self.platform_combo = SearchableComboBox()
-        self.game_combo = SearchableComboBox()
-        self.region_combo = SearchableComboBox()
+        upper_layout.addWidget(self.platform_combo)
+
+        # Game search
+        upper_layout.addWidget(QLabel("Search Game:"))
+        self.game_search = QLineEdit()
+        self.game_search.setPlaceholderText("Type game name and press Enter...")
+        self.game_search.returnPressed.connect(self.search_games)
+        upper_layout.addWidget(self.game_search)
+
+        # Game results combo
+        self.game_results_combo = QComboBox()
+        self.game_results_combo.setVisible(False)
+        self.game_results_combo.currentTextChanged.connect(self.on_game_selected)
+        upper_layout.addWidget(self.game_results_combo)
+
+        # Region selection
+        upper_layout.addWidget(QLabel("Select Region:"))
+        self.region_code_combo = QComboBox()
+        self.region_code_combo.currentTextChanged.connect(self.on_region_changed)
+        upper_layout.addWidget(self.region_code_combo)
+
+        # Scan type selection
+        upper_layout.addWidget(QLabel("Select Cover Type:"))
+        self.scan_type_combo = QComboBox()
+        self.scan_type_combo.currentTextChanged.connect(self.on_scan_type_changed)
+        upper_layout.addWidget(self.scan_type_combo)
         
+        # Custom region selection
+        upper_layout.addWidget(QLabel("Custom Region (overrides region in export):"))
+        self.custom_region_input = QLineEdit()
+        self.custom_region_input.setPlaceholderText("Leave empty to use selected region")
+        upper_layout.addWidget(self.custom_region_input)
+        
+        # Custom image URL
+        upper_layout.addWidget(QLabel("Custom Image URL (used if no image selected):"))
+        self.custom_image_url = QLineEdit()
+        self.custom_image_url.setPlaceholderText("Enter URL for custom image or leave empty")
+        upper_layout.addWidget(self.custom_image_url)
+        
+        # Variant selection
+        upper_layout.addWidget(QLabel("Select Variant:"))
+        self.variant_combo = QComboBox()
+        self.variant_combo.addItems(self.variants)
+        self.variant_combo.setCurrentIndex(0)  # Default to first variant
+        upper_layout.addWidget(self.variant_combo)
+        
+        inventory_group = QWidget()
+        inventory_layout = QHBoxLayout(inventory_group)
+
+        # Location input
+        location_label = QLabel("Location:")
+        self.location_input = QLineEdit()
+        self.location_input.setText("In-Store Reservoir")
+        self.location_input.setPlaceholderText("Enter location name")
+        inventory_layout.addWidget(location_label)
+        inventory_layout.addWidget(self.location_input)
+
+        # Quantity input
+        quantity_label = QLabel("Quantity:")
+        self.quantity_input = QLineEdit()
+        self.quantity_input.setText("0")
+        self.quantity_input.setPlaceholderText("Enter quantity")
+        self.quantity_input.setValidator(QIntValidator(0, 9999))
+        inventory_layout.addWidget(quantity_label)
+        inventory_layout.addWidget(self.quantity_input)
+
+        upper_layout.addWidget(inventory_group)
+
+
+        # Additional tags
+        upper_layout.addWidget(QLabel("Additional Tags (comma separated):"))
+        self.custom_tags_input = QLineEdit()
+        upper_layout.addWidget(self.custom_tags_input)
+
+        # Name label
+        self.details_labels = {
+            'Name': QLabel()
+        }
+        self.details_labels['Name'].setWordWrap(True)
+        upper_layout.addWidget(self.details_labels['Name'])
+
+        # Add upper container to main layout
+        layout.addWidget(upper_container)
+
+        # Set up scroll area and image container
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         self.image_container = QWidget()
-        self.image_layout = QHBoxLayout(self.image_container)
-        self.image_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.image_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        self.image_layout = QGridLayout(self.image_container)
+        self.image_layout.setSpacing(10)
+        self.image_layout.setContentsMargins(10, 10, 10, 10)
+        self.image_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        
         self.scroll_area.setWidget(self.image_container)
-        
-        self.create_ui(main_layout)
-        
+        layout.addWidget(self.scroll_area, 1)
+
+        # Bottom button layout (side-by-side buttons)
+        bottom_button_layout = QHBoxLayout()
+
+        # Add export button
+        self.export_button = QPushButton("Export Selected to CSV")
+        self.export_button.setFixedWidth(200)  # Fixed width for consistent sizing
+        self.export_button.clicked.connect(self.export_to_csv)
+        bottom_button_layout.addWidget(self.export_button)
+
+        # Add refresh cache button
+        self.refresh_button = QPushButton("Refresh Cache")
+        self.refresh_button.setFixedWidth(200)  # Fixed width for consistent sizing
+        self.refresh_button.clicked.connect(self.refresh_cache)
+        bottom_button_layout.addWidget(self.refresh_button)
+
+        # Align buttons at the bottom of the window
+        layout.addLayout(bottom_button_layout)
+
+        # Add debug label (optional, can be removed later)
         self.debug_label = QLabel()
-        main_layout.addWidget(self.debug_label)
-        
-        self.platform_combo.currentTextChanged.connect(self.on_platform_changed)
-        self.game_combo.currentTextChanged.connect(self.on_game_changed)
-        self.region_combo.currentTextChanged.connect(self.update_image_display)
+        layout.addWidget(self.debug_label)
+    
+    def populate_scan_types(self, covers: Dict):
+        #Populate scan type dropdown with available types
+        unique_scan_types = set()
+
+        # Collect all unique scan types from cover groups
+        for group in self.cover_groups:
+            for cover in group.get('covers', []):
+                scan_type = cover.get('scan_of', 'Unknown')
+                if scan_type:
+                    unique_scan_types.add(scan_type)
+
+        # Update scan type combo box
+        self.scan_type_combo.clear()
+        self.scan_type_combo.addItem("Select cover type...")  # Add default option
+        if unique_scan_types:
+            # Sort and add scan types
+            for scan_type in sorted(unique_scan_types):
+                self.scan_type_combo.addItem(scan_type)
+
+        print(f"Available scan types: {sorted(unique_scan_types)}")
+
+        # Clear any existing images
+        self.clear_images()
 
     def closeEvent(self, event):
-        """Handle application closing"""
+        #Handle application closing
         self.stop_image_loaders()
         super().closeEvent(event)
 
     def stop_image_loaders(self):
-        """Stop all running image loaders"""
+        #Stop all running image loaders
         for loader in self.image_loaders:
             if loader.isRunning():
                 loader.stop()
-                loader.wait()  # Wait for the thread to finish
+                loader.wait()
         self.image_loaders.clear()
 
-    def select_file(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Select XML File", "", "XML Files (*.xml)")
-        if file_name:
-            self.load_xml_data(file_name)
-
-    def create_ui(self, layout):
-        layout.addWidget(QLabel("Select Platform:"))
-        layout.addWidget(self.platform_combo)
-        
-        layout.addWidget(QLabel("Select Game:"))
-        layout.addWidget(self.game_combo)
-        
-        layout.addWidget(QLabel("Select Region:"))
-        layout.addWidget(self.region_combo)
-        
-        # Add custom tags input
-        layout.addWidget(QLabel("Additional Tags (comma separated):"))
-        self.custom_tags_input = QLineEdit()
-        self.custom_tags_input.setPlaceholderText("Enter additional tags, separated by commas")
-        layout.addWidget(self.custom_tags_input)
-        
-        self.details_labels = {
-            'Name': QLabel(),
-            'ReleaseDate': QLabel(),
-            'Developer': QLabel(),
-            'Publisher': QLabel(),
-            'Genres': QLabel(),
-            'Overview': QLabel(),
-        }
-        
-        for label in self.details_labels.values():
-            label.setWordWrap(True)
-            layout.addWidget(label)
-        
-        layout.addWidget(self.scroll_area)
-        layout.addStretch()
-
-    def parse_element(self, buffer, tag_type):
+    def load_platforms(self):
+        #Load platforms from MobyGames API
         try:
-            element = ET.fromstring(buffer)
-            data = {}
-            database_id = None
-            
-            for child in element:
-                if child.text:
-                    data[child.tag] = child.text.strip()
-                    if child.tag == 'DatabaseID':
-                        database_id = child.text.strip()
-                    elif child.tag == 'Region':
-                        self.regions.add(child.text.strip())
-            
-            return database_id, data
-        except ET.ParseError as e:
-            print(f"Error parsing {tag_type}: {e}")
-            print(f"Problematic XML: {buffer[:200]}...")
-            return None, None
-
-    def load_xml_data(self, xml_file_path):
-        try:
-            progress = QProgressDialog("Loading XML data...", None, 0, 100, self)
+            progress = QProgressDialog("Loading platforms...", "Cancel", 0, 100, self)
             progress.setWindowModality(Qt.WindowModality.WindowModal)
-            progress.show()
-            
-            print(f"Starting XML parsing of file: {xml_file_path}")
-            
-            # Clear existing data
-            self.stop_image_loaders()
-            self.clear_images()
-            self.platforms.clear()
-            self.regions.clear()
-            self.games_by_platform.clear()
-            self.games_data.clear()
-            self.images_data.clear()
-            
-            with open(xml_file_path, 'r', encoding='utf-8') as file:
-                buffer = ""
-                in_tag = False
-                current_tag = None
-                processed_elements = 0
-                
-                for line in file:
-                    if '<Game>' in line:
-                        in_tag = True
-                        current_tag = 'Game'
-                        buffer = line
-                    elif '<GameImage>' in line:
-                        in_tag = True
-                        current_tag = 'GameImage'
-                        buffer = line
-                    elif '</Game>' in line and current_tag == 'Game':
-                        buffer += line
-                        database_id, game_data = self.parse_element(buffer, 'Game')
-                        
-                        if database_id and game_data:
-                            if 'Platform' in game_data:
-                                platform = game_data['Platform']
-                                self.platforms.add(platform)
-                                self.games_data[database_id] = game_data
-                                self.games_by_platform[platform].append(game_data)
-                                
-                                processed_elements += 1
-                                if processed_elements % 100 == 0:
-                                    progress.setValue(processed_elements % 100)
-                        
-                        buffer = ""
-                        in_tag = False
-                        current_tag = None
-                        
-                    elif '</GameImage>' in line and current_tag == 'GameImage':
-                        buffer += line
-                        database_id, image_data = self.parse_element(buffer, 'GameImage')
-                        
-                        if database_id and image_data:
-                            self.images_data[database_id].append(image_data)
-                        
-                        buffer = ""
-                        in_tag = False
-                        current_tag = None
-                        
-                    elif in_tag:
-                        buffer += line
+            progress.setAutoClose(True)
+            progress.setValue(0)
 
-            # Update UI
+            platforms = self.api.get_platforms()
+            print(f"Loaded {len(platforms)} platforms")
+
+            # Store both id and name for each platform
+            self.platforms = {p['platform_name']: p['platform_id'] for p in platforms}
+
             self.platform_combo.clear()
-            self.platform_combo.addItems(sorted(self.platforms))
+            self.platform_combo.addItems(sorted(self.platforms.keys()))
             self.platform_combo.setCurrentText("")
             self.platform_combo.lineEdit().setPlaceholderText("Search platforms...")
-            
-            self.debug_label.setText(
-                f"Loaded {len(self.platforms)} platforms, {len(self.games_data)} games, "
-                f"and {sum(len(imgs) for imgs in self.images_data.values())} total images"
-            )
-            
+
+            progress.setValue(100)
+
         except Exception as e:
-            print(f"Error loading XML: {str(e)}")
-            self.debug_label.setText(f"Error loading XML: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        
-        finally:
-            progress.close()
+            print(f"Error loading platforms: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to load platforms: {str(e)}")
+
+    def populate_regions(self, covers: Dict):
+        #Populate region dropdown with unique regions from cover groups
+        unique_regions = set()
+        self.cover_groups = covers.get('cover_groups', [])
+
+        print("\nProcessing cover groups response:")
+        print(f"Number of cover groups: {len(self.cover_groups)}")
+
+        # Collect all unique regions from cover groups
+        for group in self.cover_groups:
+            countries = group.get('countries', [])
+            print(f"Cover group countries: {countries}")
+            for country in countries:
+                unique_regions.add(country)
+
+        print(f"Total unique regions found: {len(unique_regions)}")
+        print(f"Regions: {sorted(unique_regions)}\n")
+
+        # Update region combo box
+        self.region_code_combo.clear()
+        if unique_regions:
+            sorted_regions = sorted(unique_regions)
+            self.region_code_combo.addItems(sorted_regions)
+
+            # Try to select a preferred region if available
+            preferred_regions = ['United States', 'Australia', 'Europe', 'Japan']
+            for region in preferred_regions:
+                if region in sorted_regions:
+                    index = sorted_regions.index(region)
+                    self.region_code_combo.setCurrentIndex(index)
+                    break
+            else:
+                # If no preferred region found, select the first one
+                self.region_code_combo.setCurrentIndex(0)
+        else:
+            self.region_code_combo.addItem("No regions available")
+            print("Warning: No regions found in cover groups")
+
+        # Clear any existing images
+        self.clear_images()
+
+    def on_region_changed(self, region: str):
+        #Handle region selection change
+        print(f"\nRegion changed to: {region}")
+        # Only display covers if we have both region and scan type selected
+        if hasattr(self, 'cover_groups') and self.scan_type_combo.currentText() != "Select cover type...":
+            self.display_covers_for_region(region, self.scan_type_combo.currentText())
+        else:
+            print("Waiting for scan type selection...")
+            self.clear_images()
+
+    def display_covers_for_region(self, selected_region: str, selected_scan_type: str = None):
+        #Display covers for selected region and scan type-
+        self.stop_image_loaders()
+        self.clear_images()
+
+        if not hasattr(self, 'cover_groups') or not selected_region:
+            print("No cover groups available or no region selected")
+            return
+
+        print(f"\nDisplaying covers for region: {selected_region}, scan type: {selected_scan_type}")
+
+        # Find cover group for selected region
+        filtered_covers = []
+        for group in self.cover_groups:
+            countries = group.get('countries', [])
+            if selected_region in countries:
+                covers = group.get('covers', [])
+                print(f"Found {len(covers)} covers in group with countries: {countries}")
+                for cover in covers:
+                    # Filter by scan type if specified
+                    if selected_scan_type and cover.get('scan_of') != selected_scan_type:
+                        continue
+                    cover['countries'] = countries  # Add countries to each cover
+                    filtered_covers.append(cover)
+
+        print(f"Total matching covers found: {len(filtered_covers)}")
+
+        # Display filtered covers
+        cols = 6
+        for i, cover in enumerate(filtered_covers):
+            regions = cover.get('countries', ['Unknown Region'])
+            region_str = ', '.join(regions)
+            scan_type = cover.get('scan_of', 'Cover')
+
+            print(f"Processing cover {i+1}: {scan_type} for {region_str}")
+
+            image_widget = ImageWidget(
+                image_url=cover.get('image', ''),
+                image_type=scan_type,
+                region=region_str
+            )
+
+            row = i // cols
+            col = i % cols
+            self.image_layout.addWidget(image_widget, row, col)
+
+            # Start loading the image
+            loader = ImageLoader(cover['image'], cover['image'])
+            loader.image_loaded.connect(
+                lambda f, p, w=image_widget: self.on_image_loaded_new(f, p, w))
+            self.image_loaders.append(loader)
+            loader.start()
+
+        # Show message if no covers found
+        if not filtered_covers:
+            message = f"No covers found for region {selected_region}"
+            if selected_scan_type:
+                message += f" and type {selected_scan_type}"
+            print(message)
+            no_covers_label = QLabel(message)
+            no_covers_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            no_covers_label.setStyleSheet("color: gray; padding: 20px;")
+            self.image_layout.addWidget(no_covers_label, 0, 0)
+            
+    def refresh_cache(self):
+        #Clear the cache directory and reload data
+        try:
+            import shutil
+            cache_dir = self.api.config.cache_dir
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir)
+            os.makedirs(cache_dir)
+
+            # Reload current view
+            self.load_platforms()
+            QMessageBox.information(self, "Success", "Cache refreshed successfully")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to refresh cache: {str(e)}")
 
     def clear_images(self):
-        """Clear images and stop loaders"""
+        #Clear images and stop loaders
         self.stop_image_loaders()
         while self.image_layout.count():
             item = self.image_layout.takeAt(0)
@@ -338,192 +770,271 @@ class GameBrowser(QMainWindow):
             if widget:
                 widget.deleteLater()
 
-    def on_platform_changed(self, platform):
-        """Handle platform selection change"""
-        self.stop_image_loaders()
-        self.clear_images()
-        self.game_combo.clear()
-        self.region_combo.clear()
-        if platform:
-            print(f"Loading games for platform: {platform}")
-            games = sorted(self.games_by_platform[platform], key=lambda x: x.get('Name', ''))
-            self.game_combo.addItems([game['Name'] for game in games])
-            self.game_combo.setCurrentText("")
-            self.game_combo.lineEdit().setPlaceholderText("Search games...")
+    def clear_game_details(self):
+        #Clear all game details displays
+        for label in self.details_labels.values():
+            label.setText("")
 
-    def get_game_regions(self, database_id):
-        """Get all unique regions for a specific game's images"""
-        if database_id in self.images_data:
-            regions = set()
-            for image in self.images_data[database_id]:
-                if 'Region' in image:
-                    regions.add(image['Region'])
-            return sorted(regions)
-        return []
-
-    def on_image_loaded(self, filename, pixmap):
-        """Handle loaded image"""
-        image_widget = ImageWidget()
-        image_widget.image_label.setPixmap(pixmap)
-        image_widget.info_label.setText(filename)
-        self.image_layout.addWidget(image_widget)
-
-    def update_image_display(self):
-        """Update the image display for the selected game and region"""
-        self.stop_image_loaders()
-        self.clear_images()
-        
-        game_name = self.game_combo.currentText()
-        if not game_name:
+    def load_game_details(self):
+        #Load game covers
+        if not hasattr(self, 'selected_game_id'):
             return
+
+        try:
+            progress = QProgressDialog("Loading game covers...", "Cancel", 0, 100, self)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setAutoClose(True)
+            progress.setValue(0)
+
+            # Get platform ID for current platform
+            platform_id = self.platforms[self.platform_combo.currentText()]
+
+            print(f"\nLoading covers for game ID: {self.selected_game_id} on platform: {platform_id}")
+
+            # Load cover images for specific platform
+            covers_response = self.api.get_game_platform_covers(self.selected_game_id, platform_id)
+            print(f"Received cover groups: {len(covers_response.get('cover_groups', []))}")
+
+            progress.setValue(50)
+
+            # Update the name label with just the game title
+            game_title = next(g for g in self.current_games if g['game_id'] == self.selected_game_id)['title']
+            self.details_labels['Name'].setText(f"Name: {game_title}")
+
+            # Populate regions and scan types
+            self.populate_regions(covers_response)
+            self.populate_scan_types(covers_response)
+
+            # Clear any existing images
+            self.clear_images()
+
+            progress.setValue(100)
             
-        platform = self.platform_combo.currentText()
-        selected_region = self.region_combo.currentText()
-        
-        game_data = next((game for game in self.games_by_platform[platform] 
-                         if game['Name'] == game_name), None)
-        
-        if game_data and selected_region:
-            database_id = game_data.get('DatabaseID')
-            if database_id:
-                all_images = self.images_data.get(database_id, [])
-                images = [img for img in all_images if img.get('Region') == selected_region]
-                
-                for img in images:
-                    filename = img.get('FileName')
-                    if filename:
-                        url = f"https://images.launchbox-app.com/{filename}"
-                        loader = ImageLoader(url, filename)
-                        loader.image_loaded.connect(self.on_image_loaded)
-                        self.image_loaders.append(loader)
-                        loader.start()
-
-    def on_game_changed(self, game_name):
-        """Handle game selection change"""
-        self.stop_image_loaders()
-        self.clear_images()
-
-        if not game_name:
+        except Exception as e:
+            print(f"Error loading game details: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to load game covers: {str(e)}")
+            
+    def on_scan_type_changed(self, scan_type: str):
+        # Handle scan type selection change
+        if scan_type == "Select cover type...":
             return
 
-        platform = self.platform_combo.currentText()
-        game_data = next((game for game in self.games_by_platform[platform] 
-                         if game['Name'] == game_name), None)
+        print(f"\nScan type changed to: {scan_type}")
+        if hasattr(self, 'cover_groups') and self.region_code_combo.currentText():
+            self.display_covers_for_region(self.region_code_combo.currentText(), scan_type)
 
-        if game_data:
-            self.details_labels['Name'].setText(f"Name: {game_data.get('Name', 'N/A')}")
-            self.details_labels['ReleaseDate'].setText(
-                f"Release Date: {game_data.get('ReleaseDate', 'N/A')}")
-            self.details_labels['Developer'].setText(
-                f"Developer: {game_data.get('Developer', 'N/A')}")
-            self.details_labels['Publisher'].setText(
-                f"Publisher: {game_data.get('Publisher', 'N/A')}")
-            self.details_labels['Genres'].setText(f"Genres: {game_data.get('Genres', 'N/A')}")
+    def on_image_loaded_new(self, filename, pixmap, widget):
+        # Handle loaded image for existing widget
+        if widget:
+            # Scale pixmap to fit the label while maintaining aspect ratio
+            scaled_pixmap = pixmap.scaled(
+                widget.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            widget.image_label.setPixmap(scaled_pixmap)
 
-            overview = game_data.get('Overview', 'N/A')
-            if len(overview) > 500:
-                overview = overview[:497] + "..."
-            self.details_labels['Overview'].setText(f"Overview: {overview}")
+    def on_game_selected(self, display_text: str):
+        # Handle game selection from search results
+        if not display_text or display_text in ["Searching...", "No games found"]:
+            return
+    
+        try:
+            # Get the current index and retrieve the stored game ID
+            current_text = self.game_results_combo.currentText()
+            game_id_str = current_text.split("(ID: ")[-1].rstrip(")")  # Extract ID from display text
+            
+            # Find selected game from current_games using the game ID
+            game = next(g for g in self.current_games if str(g['game_id']) == game_id_str)
+            self.selected_game_id = game['game_id']
+    
+            print(f"Selected game ID: {self.selected_game_id}")
+    
+            # Clear previous details/images
+            self.clear_game_details()
+            self.clear_images()
+    
+            # Load and display game details and covers
+            self.load_game_details()
+    
+        except Exception as e:
+            print(f"Error in game selection: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to select game: {str(e)}")
 
-            database_id = game_data.get('DatabaseID')
-            if database_id:
-                self.region_combo.clear()
-                available_regions = self.get_game_regions(database_id)
-                if available_regions:
-                    self.region_combo.addItems(available_regions)
-                    self.region_combo.setCurrentIndex(0)
-                    self.region_combo.lineEdit().setPlaceholderText("Search regions...")
-                    self.update_image_display()
-                else:
-                    self.clear_images()
-        
+    def search_games(self):
+        # Handle game search
+        search_term = self.game_search.text().strip()
+        platform_name = self.platform_combo.currentText()
+
+        if not search_term or not platform_name:
+            return
+
+        try:
+            platform_id = self.platforms[platform_name]
+
+            # Show searching indicator
+            self.game_results_combo.clear()
+            self.game_results_combo.addItem("Searching...")
+            self.game_results_combo.setVisible(True)
+
+            # Get search results
+            search_results = self.api.search_games_by_platform(platform_id, search_term)
+
+            # Update results combo
+            self.game_results_combo.clear()
+            if not search_results:
+                self.game_results_combo.addItem("No games found")
+            else:
+                # Store the full game data
+                self.current_games = search_results
+
+                # Add titles with game IDs to combo
+                for game in search_results:
+                    display_text = f"{game['title']} (ID: {game['game_id']})"
+                    # Store the game ID in the item's user data
+                    self.game_results_combo.addItem(display_text, game['game_id'])
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to search games: {str(e)}")
+            self.game_results_combo.setVisible(False)
+
     def export_to_csv(self):
-        """Export selected game data to CSV"""
-        if not self.game_combo.currentText():
+        def get_existing_quantity(inventory_rows, handle, variant):
+            # Get existing quantity for a specific variant
+            for row in inventory_rows:
+                if row['Handle'] == handle and row['Option1 Value'] == variant:
+                    return int(row.get('Available', '0'))
+            return 0
+        # Export product and inventory data to CSV
+        if not self.game_results_combo.currentText():
             QMessageBox.warning(self, "Warning", "Please select a game first")
             return
 
-        # Get current game data
-        platform = self.platform_combo.currentText()
-        game_name = self.game_combo.currentText()
-        game_data = next((game for game in self.games_by_platform[platform] 
-                         if game['Name'] == game_name), None)
-
-        if not game_data:
-            return
-
-        # Get selected image URL
-        selected_image_url = None
-        for i in range(self.image_layout.count()):
-            widget = self.image_layout.itemAt(i).widget()
-            if isinstance(widget, ImageWidget) and widget.checkbox.isChecked():
-                selected_image_url = widget.image_url
-                break
-            
-        if not selected_image_url:
-            QMessageBox.warning(self, "Warning", "Please select an image")
-            return
-
-        # Get region and determine region code
-        region = self.region_combo.currentText()
-        region_code = self.get_region_code(region)
-
-        # Create handle (slug)
-        handle = f"{game_data['Name']}-{platform}-{region_code}".lower()
-        handle = handle.replace(' ', '-').replace('&', 'and')
-        handle = ''.join(c for c in handle if c.isalnum() or c == '-')
-
-        # Create title with region code
-        title = f"{game_data['Name']} {platform} Game {region_code}"
-
-        # Create product category
-        product_category = f"Gaming > {platform}"
-
-        # Create tags with custom tags
-        base_tags = [game_data['Name'], platform]
-        if platform.lower() == "playstation 2":
-            base_tags.extend(["PS2", "PlayStation2"])
-        # Add more platform aliases as needed
-
-        # Add custom tags
-        custom_tags = [tag.strip() for tag in self.custom_tags_input.text().split(',') if tag.strip()]
-        all_tags = base_tags + custom_tags
-        tags = ', '.join(all_tags)
-
-        # Create CSV row with proper quote handling
-        row = {
-            'Handle': handle,
-            'Title': title,
-            'Body (HTML)': game_data.get('Overview', ''),
-            'Vendor': 'Trippy Trades',
-            'Product Category': product_category,
-            'Type': 'Video Games & Consoles: Video Games',
-            'Tags': tags,
-            'Published': 'true',
-            'Option1 Name': 'Title',
-            'Option1 Value': 'Default Title',
-            'Variant Grams': '150.0',
-            'Variant Inventory Tracker': 'shopify',
-            'Variant Inventory Policy': 'deny',
-            'Variant Fulfillment Service': 'manual',
-            'Variant Requires Shipping': 'true',
-            'Variant Taxable': 'true',
-            'Image Src': selected_image_url,
-            'SEO Title': title,
-            'SEO Description': game_data.get('Overview', ''),
-            'Variant Weight Unit': 'kg',
-            'Status': 'active'
-        }
-
-        # Write to CSV with proper quote handling
         try:
-            file_exists = os.path.isfile('game_export.csv')
-            with open('game_export.csv', 'a', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-                if not file_exists:
-                    writer.writeheader()
+            # Get selected image URL or custom URL
+            selected_image_url = None
+            for i in range(self.image_layout.count()):
+                widget = self.image_layout.itemAt(i).widget()
+                if isinstance(widget, ImageWidget) and widget.checkbox.isChecked():
+                    selected_image_url = widget.image_url
+                    break
 
-                # Handle quotes properly
+            # If no image selected, check for custom URL
+            if not selected_image_url:
+                custom_url = self.custom_image_url.text().strip()
+                if custom_url:
+                    selected_image_url = custom_url
+                else:
+                    QMessageBox.warning(self, "Warning", "Please select an image or provide a custom image URL")
+                    return
+
+            # Get location and quantity for inventory
+            location = self.location_input.text().strip()
+            if not location:
+                QMessageBox.warning(self, "Warning", "Please enter a location")
+                return
+
+            try:
+                quantity = int(self.quantity_input.text() or "0")
+            except ValueError:
+                QMessageBox.warning(self, "Warning", "Please enter a valid quantity")
+                return
+
+            # Get current game data using game ID
+            current_text = self.game_results_combo.currentText()
+            game_id_str = current_text.split("(ID: ")[-1].rstrip(")")  # Extract ID from display text
+            game = next(g for g in self.current_games if str(g['game_id']) == game_id_str)
+
+            # Get region code and platform
+            region_code = self.custom_region_input.text().strip() or self.region_code_combo.currentText()
+            platform_name = self.platform_combo.currentText()
+
+            # Create handle (slug)
+            handle = f"{game['title']}-{platform_name}-{region_code}".lower()
+            handle = handle.replace(' ', '-').replace('&', 'and')
+            handle = ''.join(c for c in handle if c.isalnum() or c == '-')
+
+            # Function to read existing CSV into memory
+            def read_csv_to_list(filename):
+                if not os.path.exists(filename):
+                    return []
+                with open(filename, 'r', newline='', encoding='utf-8') as f:
+                    return list(csv.DictReader(f))
+
+            # Read existing CSVs
+            product_rows = read_csv_to_list('product_import.csv')
+            inventory_rows = read_csv_to_list('inventory_import.csv')
+
+            # Find and remove existing entries with the same handle
+            product_rows = [row for row in product_rows if row['Handle'] != handle]
+            inventory_rows = [row for row in inventory_rows if row['Handle'] != handle]
+
+            # Create title with region code
+            title = f"{game['title']} {platform_name} Game [{region_code}]"
+
+            # Create product category
+            product_category = "Software > Video Game Software"
+
+            # Create tags
+            base_tags = [game['title'], platform_name]
+            if platform_name.lower() == "playstation 2":
+                base_tags.extend(["PS2", "PlayStation2"])
+
+            # Add custom tags
+            custom_tags = [tag.strip() for tag in self.custom_tags_input.text().split(',') if tag.strip()]
+            all_tags = base_tags + custom_tags
+            tags = ', '.join(all_tags)
+
+            # Create base row with all data
+            base_row = {
+                'Handle': handle,
+                'Title': title,
+                'Vendor': 'Trippy Trades',
+                'Product Category': product_category,
+                'Type': 'Video Games & Consoles: Video Games',
+                'Tags': tags,
+                'Published': 'false',
+                'Option1 Name': 'Title',
+                'Variant Grams': '150.0',
+                'Variant Inventory Tracker': 'shopify',
+                'Variant Inventory Policy': 'deny',
+                'Variant Fulfillment Service': 'manual',
+                'Variant Price': '0.00',
+                'Variant Requires Shipping': 'true',
+                'Variant Taxable': 'true',
+                'Image Src': selected_image_url,
+                'Image Position': '1',
+                'SEO Title': title,
+                'Variant Weight Unit': 'kg',
+                'Included / Australia': 'true',
+                'Included / new zealand': 'true',
+                'Included / world wide': 'true',
+                'Status': 'draft'
+            }
+
+            # Get selected variant
+            selected_variant = self.variant_combo.currentText()
+
+            # Prepare new product rows
+            new_product_rows = []
+            for i, variant in enumerate(self.variants):
+                row = base_row.copy() if i == 0 else {
+                    'Handle': handle,
+                    'Option1 Value': variant,
+                    'Variant Grams': '150.0',
+                    'Variant Inventory Tracker': 'shopify',
+                    'Variant Inventory Policy': 'deny',
+                    'Variant Fulfillment Service': 'manual',
+                    'Variant Price': '0.00',
+                    'Variant Requires Shipping': 'true',
+                    'Variant Taxable': 'true',
+                    'Variant Weight Unit': 'kg'
+                }
+
+                if i == 0:  # First row gets the variant name too
+                    row['Option1 Value'] = variant
+
+                # Handle quotes for fields with commas
                 processed_row = {}
                 for key, value in row.items():
                     if isinstance(value, str):
@@ -534,70 +1045,184 @@ class GameBrowser(QMainWindow):
                     else:
                         processed_row[key] = value
 
-                writer.writerow(processed_row)
+                new_product_rows.append(processed_row)
 
-            QMessageBox.information(self, "Success", "Game data exported successfully!")
+            # Prepare new inventory rows
+            new_inventory_rows = []
+            for variant in self.variants:
+                # Get existing quantity for this variant
+                existing_quantity = get_existing_quantity(inventory_rows, handle, variant)
+                
+                # Calculate new quantity (add to existing if this is the selected variant)
+                new_quantity = existing_quantity
+                if variant == selected_variant:
+                    new_quantity += quantity
+                
+                row = {
+                    'Handle': handle,
+                    'Title': '',
+                    'Option1 Name': 'Title',
+                    'Option1 Value': variant,
+                    'Option2 Name': '',
+                    'Option2 Value': '',
+                    'Option3 Name': '',
+                    'Option3 Value': '',
+                    'SKU': '',
+                    'HS Code': '',
+                    'COO': '',
+                    'Location': location,
+                    'Unavailable': '0',
+                    'Committed': '0',
+                    'Available': str(new_quantity),
+                    'On hand': str(new_quantity)
+                }
+                new_inventory_rows.append(row)
+
+            # Write updated product CSV
+            with open('product_import.csv', 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+                writer.writeheader()
+                writer.writerows(product_rows + new_product_rows)
+
+            # Write updated inventory CSV
+            inventory_fields = [
+                'Handle', 'Title', 'Option1 Name', 'Option1 Value', 
+                'Option2 Name', 'Option2 Value', 'Option3 Name', 'Option3 Value',
+                'SKU', 'HS Code', 'COO', 'Location', 
+                'Unavailable', 'Committed', 'Available', 'On hand'
+            ]
+            with open('inventory_import.csv', 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=inventory_fields)
+                writer.writeheader()
+                writer.writerows(inventory_rows + new_inventory_rows)
+
+            # Show success message
+            self.message_label.setText("Product and inventory data updated successfully!")
+            self.message_label.setStyleSheet("color: green;")
+            QTimer.singleShot(5000, lambda: self.message_label.setText(""))
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
-            
-    def get_region_code(self, region):
-        """Get standardized region code"""
-        if region in ["USA", "North America", "Canada"]:
-            return "NTSC-U/C"
-        elif region in ["Japan", "South Korea", "Taiwan", "Hong Kong"]:
-            return "NTSC-J"
-        elif region in ["China"]:
-            return "NTSC-C"
-        elif region in ["Europe", "Australia", "New Zealand", "Germany", "United Kingdom"]:
-            return "PAL"
-        return region  # Return original region if no match
-        
-    def on_image_loaded(self, filename, pixmap):
-        """Handle loaded image with URL storage"""
-        image_widget = ImageWidget()
-        image_widget.image_label.setPixmap(pixmap)
-        image_widget.info_label.setText(filename)
-        image_widget.image_url = f"https://images.launchbox-app.com/{filename}"
-        self.image_layout.addWidget(image_widget)
 
-CSV_FIELDS = [
-    'Handle', 'Title', 'Body (HTML)', 'Vendor', 'Product Category', 'Type', 'Tags',
-    'Published', 'Option1 Name', 'Option1 Value', 'Option1 Linked To', 'Option2 Name',
-    'Option2 Value', 'Option2 Linked To', 'Option3 Name', 'Option3 Value',
-    'Option3 Linked To', 'Variant SKU', 'Variant Grams', 'Variant Inventory Tracker',
-    'Variant Inventory Policy', 'Variant Fulfillment Service', 'Variant Price',
-    'Variant Compare At Price', 'Variant Requires Shipping', 'Variant Taxable',
-    'Variant Barcode', 'Image Src', 'Image Position', 'Image Alt Text', 'Gift Card',
-    'SEO Title', 'SEO Description', 'Google Shopping / Google Product Category',
-    'Google Shopping / Gender', 'Google Shopping / Age Group', 'Google Shopping / MPN',
-    'Google Shopping / Condition', 'Google Shopping / Custom Product',
-    'Google Shopping / Custom Label 0', 'Google Shopping / Custom Label 1',
-    'Google Shopping / Custom Label 2', 'Google Shopping / Custom Label 3',
-    'Google Shopping / Custom Label 4',
-    'EComposer product countdown end at (product.metafields.ecomposer.countdown)',
-    'EComposer product countdown start at (product.metafields.ecomposer.countdown_from)',
-    'Google: Custom Product (product.metafields.mm-google-shopping.custom_product)',
-    'Recommended age group (product.metafields.shopify.recommended-age-group)',
-    'Toy figure features (product.metafields.shopify.toy-figure-features)',
-    'Video game genre (product.metafields.shopify.video-game-genre)',
-    'Video game platform (product.metafields.shopify.video-game-platform)',
-    'Video game sub-genre (product.metafields.shopify.video-game-sub-genre)',
-    'Complementary products (product.metafields.shopify--discovery--product_recommendation.complementary_products)',
-    'Related products (product.metafields.shopify--discovery--product_recommendation.related_products)',
-    'Related products settings (product.metafields.shopify--discovery--product_recommendation.related_products_display)',
-    'Variant Image', 'Variant Weight Unit', 'Variant Tax Code', 'Cost per item',
-    'Included / Australia', 'Price / Australia', 'Compare At Price / Australia',
-    'Included / new zealand', 'Price / new zealand', 'Compare At Price / new zealand',
-    'Included / world wide', 'Price / world wide', 'Compare At Price / world wide',
-    'Status'
-]
+    def get_selected_variant(self) -> str:
+        # Get the currently selected variant
+        return self.variant_combo.currentText()
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+
+    # Apply a modern and sharp theme with better layout and hover colors for dropdowns
+    app.setStyleSheet("""
+        QMainWindow {
+            background-color: #ffffff;
+        }
+
+        QLabel {
+            color: #2c3e50;
+            font-size: 16px;  # Larger font for clarity
+            font-weight: bold;
+            padding: 5px;
+        }
+
+        QPushButton {
+            background-color: #dc34af;
+            color: white;
+            border-radius: 5px;
+            padding: 10px;
+            font-size: 15px;  # Slightly larger text
+            border: none;
+        }
+
+        QPushButton:hover {
+            background-color: #57a5d8;
+        }
+
+        QPushButton:pressed {
+            background-color: #3498db;
+        }
+
+        QFrame {
+            border: 2px solid #57a5d8;  # Thicker border for emphasis
+            border-radius: 5px;
+            background-color: #f0f0f0;
+            margin: 15px;  # Increased margin for spacing
+        }
+
+        QCheckBox {
+            color: #2c3e50;
+            font-size: 14px;
+        }
+
+        QCheckBox::indicator {
+            border: 2px solid #dc34af;  # Thicker indicator border
+            width: 18px;
+            height: 18px;
+            background-color: #f0f0f0;
+        }
+
+        QCheckBox::indicator:checked {
+            background-color: #57a5d8;
+            border: 2px solid #57a5d8;
+        }
+
+        QComboBox {
+            border: 1px solid #dc34af;
+            background-color: #ffffff;
+            padding: 8px;
+            font-size: 14px;
+        }
+
+        QComboBox::drop-down {
+            border: 0px;
+        }
+
+        QComboBox::item {
+            color: #2c3e50;
+            background-color: #ffffff;
+        }
+
+        QComboBox QAbstractItemView {
+            border: 1px solid #57a5d8;
+            selection-background-color: #dc34af;  # Background color when hovering or selecting
+            selection-color: #ffffff;  # Text color when selecting
+        }
+
+        QLineEdit {
+            border: 2px solid #57a5d8;
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        QDialog {
+            background-color: #f0f0f0;
+            border: 2px solid #dc34af;
+        }
+
+        QProgressDialog {
+            background-color: #ffffff;
+            border: 1px solid #dc34af;
+            padding: 10px;
+            font-size: 14px;
+        }
+
+        QMessageBox {
+            background-color: #ffffff;
+            border: 2px solid #57a5d8;
+            padding: 10px;
+        }
+
+        QScrollArea {
+            border: none;
+            padding: 10px;
+        }
+    """)
+
     window = GameBrowser()
     window.show()
     sys.exit(app.exec())
+
 
 if __name__ == '__main__':
     main()
